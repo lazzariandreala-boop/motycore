@@ -73,9 +73,10 @@
 </template>
 
 <script setup lang="ts">
-import { cercaImmagineWikipedia } from '~/composables/useWikipediaImage'
+import { useWikipediaImage } from '../../composables/useWikipediaImage'
 
 const { getTutteLeMoto, updateImmagineUrl } = useMotyDb()
+const { cerca: cercaImmagine } = useWikipediaImage()
 const config = useRuntimeConfig()
 
 const moto      = ref<any[]>([])
@@ -109,7 +110,7 @@ async function avviaBatch() {
 
   for (const m of moto.value) {
     risultati[m.id] = 'pending'
-    const url = await cercaImmagineWikipedia(m.marca, m.modello, m.anno_inizio, opts)
+    const url = await cercaImmagine(m.marca, m.modello, m.anno_inizio, opts, m.cilindrata)
 
     if (url) {
       try {
@@ -125,8 +126,7 @@ async function avviaBatch() {
     }
 
     elaborati.value++
-    // Piccola pausa per non saturare Wikipedia API
-    await new Promise(r => setTimeout(r, 120))
+    await new Promise(r => setTimeout(r, 1500))
   }
 
   inCorso.value    = false
@@ -182,6 +182,7 @@ useSeoMeta({ title: 'Admin — Immagini | MotyCore' })
 .moto-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  grid-auto-rows: 240px;
   gap: 16px;
 }
 .moto-img-card {
@@ -189,6 +190,7 @@ useSeoMeta({ title: 'Admin — Immagini | MotyCore' })
   flex-direction: column;
   overflow: hidden;
   padding: 0;
+  height: 100%;
   transition: border-color 0.2s;
 }
 .moto-img-card.has-image { border-color: var(--accent); }
@@ -196,14 +198,14 @@ useSeoMeta({ title: 'Admin — Immagini | MotyCore' })
 
 .img-wrap {
   position: relative;
-  width: 100%;
-  aspect-ratio: 4/3;
+  flex: 1;
+  min-height: 0;
   background: var(--bg-elevated);
 }
 .moto-img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
 }
 .img-placeholder {

@@ -1,6 +1,6 @@
 // server/api/moto-image.get.ts
 // Tutta la logica di ricerca immagini è server-side:
-// 1) moto.it  2) Wikipedia REST API  3) Wikimedia Commons
+// 1) moto.it  2) inSella.it  3) Wikipedia REST API  4) Wikimedia Commons
 // Il browser fa UNA sola richiesta a /api/moto-image, zero errori in console.
 
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -34,6 +34,16 @@ function ogImage(html: string): string | null {
   )
 }
 
+// ── filtro immagine ────────────────────────────────────────────────────────────
+// Scarta URL che sembrano non essere foto di moto (loghi, persone, veicoli commerciali)
+function isGoodImg(url: string): boolean {
+  if (!url) return false
+  const u = url.toLowerCase()
+  if (/logo|placeholder|default|brand|favicon|icon/i.test(u)) return false
+  if (/\b(truck|lorry|camion|bus|furgone|pickup|van)\b/i.test(u)) return false
+  return true
+}
+
 // ── helper moto.it ────────────────────────────────────────────────────────────
 async function provaMotoIt(url: string, stem: string): Promise<string | null> {
   try {
@@ -41,13 +51,13 @@ async function provaMotoIt(url: string, stem: string): Promise<string | null> {
     if (!res.ok) return null
     if (!res.url.includes(stem)) return null
     const img = ogImage(await res.text())
-    if (img && !/logo|placeholder|default|brand/i.test(img)) return img
+    if (img && isGoodImg(img)) return img
   } catch {}
   return null
 }
 
 // ── 1. moto.it ────────────────────────────────────────────────────────────────
-async function daMotoIt(marca: string, modello: string, cilindrata = ''): Promise<string | null> {
+async function daMotoIt(marca: string, modello: string, cilindrata = '', anno = ''): Promise<string | null> {
   const ms  = toSlug(marca)
   const cc  = cilindrata ? String(Math.round(Number(cilindrata) / 50) * 50) : ''
 
@@ -115,10 +125,21 @@ async function daMotoIt(marca: string, modello: string, cilindrata = ''): Promis
     }
   }
 
+  // ── Fase 4: solo parola base (senza numeri) ─────────────────────────────────
+  // "atlantic-500" → "atlantic", "f-650-gs" → "f-gs" (troppo corto, skip se < 4 car.)
+  const wordOnly = dsBase.replace(/-?\d+-?/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
+  if (wordOnly.length >= 4 && wordOnly !== dsBase) {
+    const img = await provaMotoIt(`https://www.moto.it/listino/${ms}/${wordOnly}/`, wordOnly)
+    if (img) return img
+  }
+
   return null
 }
 
 // ── 2. Wikipedia REST API ─────────────────────────────────────────────────────
+const NON_MOTO = /\b(truck|lorry|camion|bus|aircraft|airplane|ship|boat|automobile|tractor|politician|musician|actor|actress|singer|company|corporation|building)\b/i
+const MOTO_KEYWORDS = /\b(motorcycle|motorbike|moto|scooter|naked|enduro|touring|trail|cruiser|motocicletta|\d+\s*cc|\d+\s*cv|two.wheel|bicilindri|monocilindri)\b/i
+
 async function daWikipedia(marca: string, modello: string): Promise<string | null> {
   const titoli = [`${marca} ${modello}`, modello, `${marca} ${modello} motorcycle`]
   const lingue = ['en', 'it']
@@ -133,23 +154,74 @@ async function daWikipedia(marca: string, modello: string): Promise<string | nul
         )
         if (!res.ok) continue
         const data = await res.json()
-        if (data.thumbnail?.source) return data.thumbnail.source
+        if (data.type !== 'standard') continue
+        const desc = `${data.description || ''} ${data.extract?.slice(0, 300) || ''}`
+        if (NON_MOTO.test(desc)) continue
+        // Richiede almeno un keyword moto nella descrizione
+        if (!MOTO_KEYWORDS.test(desc)) continue
+        const thumb = data.thumbnail
+        if (!thumb?.source || !isGoodImg(thumb.source)) continue
+        // Rifiuta immagini ritratto (persone) — le moto sono sempre landscape
+        if (thumb.width && thumb.height && thumb.width < thumb.height * 1.1) continue
+        return thumb.source
       } catch {}
     }
   }
   return null
 }
 
-// ── 3. Wikimedia Commons ──────────────────────────────────────────────────────
+// ── 3. inSella.it ─────────────────────────────────────────────────────────────
+// Rivista italiana dedicata esclusivamente alle moto → og:image sempre una moto
+async function daInSella(marca: string, modello: string): Promise<string | null> {
+  try {
+    const q   = encodeURIComponent(`${marca} ${modello}`)
+    const res = await fetch(`https://www.insella.it/?s=${q}`, {
+      headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'it-IT' },
+    })
+    if (!res.ok) return null
+    const html = await res.text()
+
+    // Estrae link agli articoli (URL interni, senza query string, senza categorie/tag)
+    const links = [...new Set(
+      [...html.matchAll(/href="(https:\/\/www\.insella\.it\/[^"#?]+)"/g)]
+        .map(m => m[1])
+        .filter(u => u.split('/').filter(Boolean).length >= 4) // almeno /sezione/anno/mese/titolo
+    )]
+
+    for (const link of links.slice(0, 4)) {
+      try {
+        const art = await fetch(link, { headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'it-IT' } })
+        if (!art.ok) continue
+        const img = ogImage(await art.text())
+        if (img && isGoodImg(img)) return img
+      } catch {}
+    }
+  } catch {}
+  return null
+}
+
+// ── 4. Wikimedia Commons ──────────────────────────────────────────────────────
+const BAD_FILE = /\b(truck|lorry|camion|bus|furgone|woman|man|girl|boy|person|people|show|expo|fair|salon|portrait|riding|rider|stand|booth)\b/i
+
 async function daCommons(marca: string, modello: string): Promise<string | null> {
   try {
     const q   = encodeURIComponent(`intitle:${marca} intitle:${modello}`)
-    const url = `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${q}&gsrnamespace=6&gsrlimit=10&prop=imageinfo&iiprop=url|mime&iiurlwidth=700&format=json`
+    const url = `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${q}&gsrnamespace=6&gsrlimit=10&prop=imageinfo&iiprop=url|mime|dimensions&iiurlwidth=700&format=json`
     const res  = await fetch(url, { headers: { 'User-Agent': BOT_UA } })
     if (!res.ok) return null
     const data  = await res.json()
     const pages = Object.values(data?.query?.pages ?? {}) as any[]
-    const jpeg  = pages.find(p => p.imageinfo?.[0]?.mime === 'image/jpeg')
+    const jpeg = pages.find(p => {
+      const info = p.imageinfo?.[0]
+      if (info?.mime !== 'image/jpeg') return false
+      const title = (p.title || '').toLowerCase()
+      if (BAD_FILE.test(title)) return false
+      const imgUrl = info.thumburl ?? info.url
+      if (!isGoodImg(imgUrl)) return false
+      // Rifiuta immagini ritratto — le moto sono sempre landscape
+      if (info.width && info.height && info.width < info.height * 1.1) return false
+      return true
+    })
     return jpeg?.imageinfo?.[0]?.thumburl ?? jpeg?.imageinfo?.[0]?.url ?? null
   } catch {
     return null
@@ -162,9 +234,10 @@ export default defineEventHandler(async (event) => {
   if (!marca || !modello) return { url: null }
 
   const url =
-    (await daMotoIt(marca, modello, cilindrata)) ??
-    (await daWikipedia(marca, modello))    ??
-    (await daCommons(marca, modello))
+    (await daMotoIt(marca, modello, cilindrata, anno)) ??   // 1. moto.it (foto ufficiali)
+    (await daInSella(marca, modello))                  ??   // 2. inSella.it (rivista moto IT)
+    (await daWikipedia(marca, modello))                ??   // 3. Wikipedia
+    (await daCommons(marca, modello))                       // 4. Wikimedia Commons
 
   return { url: url ?? null }
 })
